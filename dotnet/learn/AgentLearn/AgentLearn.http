@@ -1,0 +1,33 @@
+@AgentLearn_HostAddress = http://localhost:5282
+
+### Single agent mode
+POST {{AgentLearn_HostAddress}}/task
+Content-Type: application/json
+
+{
+  "task": "Tell me a joke about programming",
+  "mode": "Single",
+  "kind": "JokeWriter"
+}
+
+### Sequential mode (Writer -> Critic -> Editor)
+POST {{AgentLearn_HostAddress}}/task
+Content-Type: application/json
+
+{
+  "task": "Tell me a joke about programming",
+  "mode": "Sequential",
+  "kind": "JokeWriter"
+}
+
+### Concurrent mode (Neutral, Liberal, Conservative writers -> Selector)
+POST {{AgentLearn_HostAddress}}/task
+Content-Type: application/json
+
+{
+  "task": "Tell me a joke about electric cars",
+  "mode": "Concurrent",
+  "kind": "JokeWriter"
+}
+
+###

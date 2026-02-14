@@ -1,0 +1,6 @@
+# Copyright (c) Microsoft. All rights reserved.
+
+# Environment files with secrets
+.env
+.env.local
+.env.*.local
