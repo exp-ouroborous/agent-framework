@@ -1,15 +1,19 @@
-// Copyright (c) Microsoft. All rights reserved.
-
 using AgentLearn.Models;
 using AgentLearn.Services;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AgentLearn.Controllers;
 
+/// <summary>
+/// REST endpoint for submitting tasks to agent workflows.
+/// </summary>
 [ApiController]
 [Route("[controller]")]
 public class TaskController(IEnumerable<ITaskHandler> handlers) : ControllerBase
 {
+    /// <summary>
+    /// Dispatches a task request to the matching <see cref="ITaskHandler"/> and returns the result.
+    /// </summary>
     [HttpPost]
     public async Task<IActionResult> ProcessTask([FromBody] TaskRequest request)
     {

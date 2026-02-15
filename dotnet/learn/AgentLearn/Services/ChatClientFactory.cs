@@ -1,5 +1,3 @@
-// Copyright (c) Microsoft. All rights reserved.
-
 using System.ClientModel;
 using AgentLearn.Models;
 using Anthropic;
@@ -110,8 +108,10 @@ public sealed class MockChatClient : IChatClient
     private static readonly int s_dayOfYear = DateTime.Now.DayOfYear;
     private readonly Dictionary<string, bool> _toolCallsMade = new();
 
+    /// <inheritdoc />
     public ChatClientMetadata Metadata { get; } = new("MockChatClient", new Uri("http://localhost"), "mock-model");
 
+    /// <inheritdoc />
     public async Task<ChatResponse> GetResponseAsync(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options = null,
@@ -129,6 +129,7 @@ public sealed class MockChatClient : IChatClient
         return new ChatResponse(message);
     }
 
+    /// <inheritdoc />
     public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options = null,
@@ -141,8 +142,10 @@ public sealed class MockChatClient : IChatClient
         yield return new ChatResponseUpdate(msg.Role, msg.Text ?? "");
     }
 
+    /// <inheritdoc />
     public void Dispose() { }
 
+    /// <inheritdoc />
     public object? GetService(Type serviceType, object? key = null) => null;
 
     private static string GenerateResponse(string systemPrompt, List<ChatMessage> messages)
