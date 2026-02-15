@@ -191,6 +191,116 @@ Open Jaeger UI at http://localhost:16686 and select service "AgentLearn" to view
 - Tool invocations
 - Workflow orchestration
 
+## MSAF .NET Feature Coverage
+
+What this project demonstrates vs. what the framework offers. Features are grouped by area; "Used in" shows where AgentLearn exercises the feature (or "—" if not yet explored).
+
+### Agents
+
+| Feature | Used in | Notes |
+|---------|---------|-------|
+| `ChatClientAgent` | JokeWriter, StoryGenerator | Primary agent type throughout |
+| `DelegatingAIAgent` | — | Wrapper/composition pattern |
+| `AIAgentBuilder` / `.AsBuilder()` | JokeWriter, StoryGenerator | Fluent agent configuration |
+| Agent middleware (run-level) | — | Intercept `RunAsync` for guardrails, PII filtering |
+| Function invocation middleware | `UseToolInvocationLogging` | Logs tool calls; framework also supports pre/post interception |
+| Structured output (`RunAsync<T>`) | — | Typed JSON schema responses |
+| Agent handoffs | — | Transfer control between agents |
+| Agent sessions / thread management | — | Multi-turn conversation state |
+
+### Tools & Function Calling
+
+| Feature | Used in | Notes |
+|---------|---------|-------|
+| `AIFunctionFactory.Create` | JokeWriter (`GetDayOfYear`), StoryGenerator (`GetLuckyNumber`) | Basic tool creation from delegates |
+| `ApprovalRequiredAIFunction` | — | HITL tool approval; agent pauses before executing |
+| OpenAPI tool generation | — | Create tools from OpenAPI specs |
+| MCP client tools | — | Model Context Protocol integration |
+| MCP server (expose agents as tools) | — | Serve agent capabilities over MCP |
+
+### Workflows
+
+| Feature | Used in | Notes |
+|---------|---------|-------|
+| `WorkflowBuilder` | JokeWriter, StoryGenerator | Manual graph construction |
+| `AgentWorkflowBuilder.BuildSequential` | JokeWriter (pipelines) | Helper for linear chains |
+| Sequential workflow | JokeWriter (`JokeSequentialWorkflow`) | Writer → Critic → Editor |
+| Concurrent fan-out / fan-in | JokeWriter (`JokeConcurrentWorkflow`) | 3 parallel pipelines → aggregator → selector |
+| Sub-workflows | JokeWriter (pipelines bound via `BindAsExecutor`) | Nested workflow composition |
+| Custom executors | JokeInputExecutor, JokeOutputExecutor, JokeAggregatorExecutor, StoryNameBridgeExecutor, StoryOutputExecutor | Typed I/O boundaries |
+| `RequestPort` (workflow HITL) | StoryGenerator (`AskCharacterName`) | Workflow pauses for external input |
+| Loop / iterative workflows | — | Repeat with exit conditions |
+| Conditional / branching edges | — | Dynamic routing based on output |
+| Checkpointing | — | Save/restore workflow state |
+| Time travel (replay) | — | Replay to previous checkpoint |
+| Declarative workflows (YAML) | — | Define workflows in YAML |
+
+### Streaming & Execution
+
+| Feature | Used in | Notes |
+|---------|---------|-------|
+| `InProcessExecution.StreamAsync` | JokeWriterHandler, StoryGeneratorHandler, tests | Primary execution model |
+| `StreamingRun` / `WatchStreamAsync` | JokeWriterHandler, StoryGeneratorHandler, tests | Event-driven result collection |
+| `WorkflowOutputEvent.As<T>()` | JokeWriterHandler, StoryGeneratorHandler | Typed output extraction |
+| `AgentResponseEvent` | JokeWriterHandler, StoryGeneratorHandler | Agent response logging |
+| `ExecutorInvokedEvent` | JokeWriterHandler | Input logging for executors |
+| Agent streaming (`RunStreamingAsync`) | — | Stream individual agent responses |
+
+### Hosting & APIs
+
+| Feature | Used in | Notes |
+|---------|---------|-------|
+| OpenAI Responses API (`MapOpenAIResponses`) | Program.cs | `/responses` endpoint |
+| OpenAI Conversations API (`MapOpenAIConversations`) | Program.cs | `/conversations` endpoint |
+| DevUI (`AddDevUI` / `MapDevUI`) | Program.cs | `/devui` interactive dashboard |
+| `.AddAsAIAgent()` | JokeWriter, StoryGenerator | Expose workflows as agents for DevUI/API |
+| Azure Functions hosting | — | Durable Functions orchestration |
+| A2A hosting | — | Agent-to-Agent communication |
+| AG-UI server | — | SSE-based frontend protocol |
+
+### Observability
+
+| Feature | Used in | Notes |
+|---------|---------|-------|
+| OpenTelemetry tracing | Program.cs, JokeWriter agents | `AddSource` + OTLP exporter to Jaeger |
+| `UseOpenTelemetry` (agent) | JokeWriter (concurrent agents) | Per-agent trace spans |
+| `IChatClient` OTel wrapper | `ChatClientFactory.Create` | Traces LLM calls via `ChatClientBuilder` |
+| Aspire Dashboard | — | Alternative to Jaeger |
+| Application Insights | — | Azure cloud monitoring |
+
+### LLM Providers
+
+| Feature | Used in | Notes |
+|---------|---------|-------|
+| OpenAI | `ChatClientFactory` | Via `OpenAIClient` |
+| GitHub Models | `ChatClientFactory` | Via OpenAI SDK with custom endpoint |
+| Azure OpenAI | `ChatClientFactory` | Via `AzureOpenAIClient` |
+| Anthropic | `ChatClientFactory` | Via `AnthropicClient` |
+| Mock provider | `ChatClientFactory` | Canned responses for local dev |
+| Ollama / ONNX (local models) | — | Local inference |
+| Azure AI Foundry | — | Foundry agent support |
+
+### Memory & Persistence
+
+| Feature | Used in | Notes |
+|---------|---------|-------|
+| Chat history providers | — | In-memory, Cosmos DB |
+| Chat reduction (summarization) | — | Manage context window size |
+| Mem0 integration | — | External memory service |
+| Cosmos DB checkpointing | — | Durable workflow state |
+
+### Advanced
+
+| Feature | Used in | Notes |
+|---------|---------|-------|
+| RAG (retrieval-augmented generation) | — | Vector store, text search |
+| Multi-modal (image input/output) | — | Vision models |
+| Extended thinking (Anthropic) | — | Reasoning traces |
+| Code interpreter | — | Python execution in agents |
+| Computer use | — | Vision-based interaction |
+| Group chat | — | Multi-agent conversation |
+| Semantic Kernel plugins | — | SK integration |
+
 ## Known .NET Gaps
 
 Gaps discovered while building this project. Each entry links to the upstream issue and notes when it was last observed.
