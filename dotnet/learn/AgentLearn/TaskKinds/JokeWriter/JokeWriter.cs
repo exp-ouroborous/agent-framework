@@ -290,7 +290,7 @@ public static class JokeAgents
     {
         return new ChatClientAgent(
             chatClient,
-            name: "Writer",
+            name: "JokeWriter",
             instructions: WriterInstructions,
             tools: [AIFunctionFactory.Create(GetDayOfYear)])
             .AsBuilder()
@@ -303,7 +303,7 @@ public static class JokeAgents
     {
         return new ChatClientAgent(
             chatClient,
-            name: "Critic",
+            name: "JokeCritic",
             instructions: CriticInstructions);
     }
 
@@ -312,7 +312,7 @@ public static class JokeAgents
     {
         return new ChatClientAgent(
             chatClient,
-            name: "Editor",
+            name: "JokeEditor",
             instructions: EditorInstructions);
     }
 
@@ -321,7 +321,7 @@ public static class JokeAgents
     {
         return new ChatClientAgent(
             chatClient,
-            name: "NeutralWriter",
+            name: "JokeNeutralWriter",
             instructions: NeutralWriterInstructions,
             tools: [AIFunctionFactory.Create(GetDayOfYear)])
             .AsBuilder()
@@ -335,7 +335,7 @@ public static class JokeAgents
     {
         return new ChatClientAgent(
             chatClient,
-            name: "LiberalWriter",
+            name: "JokeLiberalWriter",
             instructions: LiberalWriterInstructions,
             tools: [AIFunctionFactory.Create(GetDayOfYear)])
             .AsBuilder()
@@ -349,7 +349,7 @@ public static class JokeAgents
     {
         return new ChatClientAgent(
             chatClient,
-            name: "ConservativeWriter",
+            name: "JokeConservativeWriter",
             instructions: ConservativeWriterInstructions,
             tools: [AIFunctionFactory.Create(GetDayOfYear)])
             .AsBuilder()
@@ -363,7 +363,7 @@ public static class JokeAgents
     {
         return new ChatClientAgent(
             chatClient,
-            name: "Selector",
+            name: "JokeSelector",
             instructions: SelectorInstructions)
             .AsBuilder()
             .UseOpenTelemetry(OTelSourceName)
@@ -382,7 +382,7 @@ public static class JokeAgents
     {
         AIAgent writer = new ChatClientAgent(
             chatClient,
-            name: $"{name}Writer",
+            name: $"Joke{name}Writer",
             instructions: writerInstructions,
             tools: [AIFunctionFactory.Create(GetDayOfYear)])
             .AsBuilder()
@@ -392,7 +392,7 @@ public static class JokeAgents
 
         AIAgent critic = new ChatClientAgent(
             chatClient,
-            name: $"{name}Critic",
+            name: $"Joke{name}Critic",
             instructions: CriticInstructions)
             .AsBuilder()
             .UseOpenTelemetry(OTelSourceName)
@@ -400,7 +400,7 @@ public static class JokeAgents
 
         AIAgent editor = new ChatClientAgent(
             chatClient,
-            name: $"{name}Editor",
+            name: $"Joke{name}Editor",
             instructions: EditorInstructions)
             .AsBuilder()
             .UseOpenTelemetry(OTelSourceName)
@@ -456,7 +456,7 @@ public static class JokeAgents
             .AddEdge(input, writerBinding)
             .AddEdge(writerBinding, output)
             .WithOutputFrom(output)
-            .WithName("SingleWorkflow")
+            .WithName("JokeSingleWorkflow")
             .Build();
     }
 
@@ -487,7 +487,7 @@ public static class JokeAgents
             .AddEdge(criticBinding, editorBinding)
             .AddEdge(editorBinding, output)
             .WithOutputFrom(output)
-            .WithName("SequentialWorkflow")
+            .WithName("JokeSequentialWorkflow")
             .Build();
     }
 
@@ -524,7 +524,7 @@ public static class JokeAgents
         builder.AddEdge(agg, selectorBinding);
         builder.AddEdge(selectorBinding, output);
         builder.WithOutputFrom(output);
-        builder.WithName("ConcurrentWorkflow");
+        builder.WithName("JokeConcurrentWorkflow");
 
         return builder.Build();
     }
@@ -551,9 +551,9 @@ public class JokeWriterHandler(IServiceProvider serviceProvider, ILogger<JokeWri
     {
         string workflowKey = request.Mode switch
         {
-            AgentMode.Single => "SingleWorkflow",
-            AgentMode.Sequential => "SequentialWorkflow",
-            AgentMode.Concurrent => "ConcurrentWorkflow",
+            AgentMode.Single => "JokeSingleWorkflow",
+            AgentMode.Sequential => "JokeSequentialWorkflow",
+            AgentMode.Concurrent => "JokeConcurrentWorkflow",
             _ => throw new NotSupportedException($"Mode '{request.Mode}' is not supported yet.")
         };
 
@@ -662,18 +662,18 @@ public static class JokeServiceRegistration
     /// </summary>
     public static WebApplicationBuilder AddJokeAgents(this WebApplicationBuilder builder)
     {
-        builder.AddAIAgent("Writer", (sp, key) =>
+        builder.AddAIAgent("JokeWriter", (sp, key) =>
             JokeAgents.CreateWriter(
                 sp.GetRequiredService<IChatClient>(),
                 sp.GetRequiredService<ILoggerFactory>()));
 
-        builder.AddAIAgent("Critic", (sp, key) =>
+        builder.AddAIAgent("JokeCritic", (sp, key) =>
             JokeAgents.CreateCritic(sp.GetRequiredService<IChatClient>()));
 
-        builder.AddAIAgent("Editor", (sp, key) =>
+        builder.AddAIAgent("JokeEditor", (sp, key) =>
             JokeAgents.CreateEditor(sp.GetRequiredService<IChatClient>()));
 
-        builder.AddAIAgent("Selector", (sp, key) =>
+        builder.AddAIAgent("JokeSelector", (sp, key) =>
             JokeAgents.CreateSelector(sp.GetRequiredService<IChatClient>()));
 
         return builder;
@@ -685,28 +685,28 @@ public static class JokeServiceRegistration
     public static WebApplicationBuilder AddJokeWorkflows(this WebApplicationBuilder builder)
     {
         // Single: JokeInput → Writer → JokeOutput
-        builder.AddWorkflow("SingleWorkflow", (sp, key) =>
+        builder.AddWorkflow("JokeSingleWorkflow", (sp, key) =>
         {
-            AIAgent writer = sp.GetRequiredKeyedService<AIAgent>("Writer");
+            AIAgent writer = sp.GetRequiredKeyedService<AIAgent>("JokeWriter");
             ILoggerFactory loggerFactory = sp.GetRequiredService<ILoggerFactory>();
             return JokeAgents.BuildSingleWorkflow(writer, loggerFactory);
         }).AddAsAIAgent();
 
         // Sequential: JokeInput → Writer → Critic → Editor → JokeOutput
-        builder.AddWorkflow("SequentialWorkflow", (sp, key) =>
+        builder.AddWorkflow("JokeSequentialWorkflow", (sp, key) =>
         {
-            AIAgent writer = sp.GetRequiredKeyedService<AIAgent>("Writer");
-            AIAgent critic = sp.GetRequiredKeyedService<AIAgent>("Critic");
-            AIAgent editor = sp.GetRequiredKeyedService<AIAgent>("Editor");
+            AIAgent writer = sp.GetRequiredKeyedService<AIAgent>("JokeWriter");
+            AIAgent critic = sp.GetRequiredKeyedService<AIAgent>("JokeCritic");
+            AIAgent editor = sp.GetRequiredKeyedService<AIAgent>("JokeEditor");
             ILoggerFactory loggerFactory = sp.GetRequiredService<ILoggerFactory>();
             return JokeAgents.BuildSequentialWorkflow(writer, critic, editor, loggerFactory);
         }).AddAsAIAgent();
 
         // Concurrent: JokeInput → FanOut[Pipelines] → Aggregator → Selector → JokeOutput
-        builder.AddWorkflow("ConcurrentWorkflow", (sp, key) =>
+        builder.AddWorkflow("JokeConcurrentWorkflow", (sp, key) =>
         {
             IChatClient client = sp.GetRequiredService<IChatClient>();
-            AIAgent selector = sp.GetRequiredKeyedService<AIAgent>("Selector");
+            AIAgent selector = sp.GetRequiredKeyedService<AIAgent>("JokeSelector");
             ILoggerFactory loggerFactory = sp.GetRequiredService<ILoggerFactory>();
             Workflow[] pipelines =
             [
