@@ -7,6 +7,7 @@
     <UserSecretsId>3d0e140f-bb1b-42ed-a236-6495a17cc94f</UserSecretsId>
     <!-- CA2007: ConfigureAwait is unnecessary in ASP.NET Core -->
     <NoWarn>$(NoWarn);CA2007</NoWarn>
+    <DefaultItemExcludes>$(DefaultItemExcludes);tests/**</DefaultItemExcludes>
   </PropertyGroup>
 
   <ItemGroup>

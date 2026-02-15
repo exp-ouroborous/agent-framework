@@ -1,0 +1,33 @@
+@AgentLearn_HostAddress = http://localhost:5282
+
+### Story about Alice (HITL provides the character name)
+POST {{AgentLearn_HostAddress}}/task
+Content-Type: application/json
+
+{
+  "task": "Alice",
+  "mode": "Single",
+  "kind": "StoryGenerator"
+}
+
+### Story about Captain Zorb
+POST {{AgentLearn_HostAddress}}/task
+Content-Type: application/json
+
+{
+  "task": "Captain Zorb",
+  "mode": "Single",
+  "kind": "StoryGenerator"
+}
+
+### Unsupported mode (should return error)
+POST {{AgentLearn_HostAddress}}/task
+Content-Type: application/json
+
+{
+  "task": "Alice",
+  "mode": "Sequential",
+  "kind": "StoryGenerator"
+}
+
+###
