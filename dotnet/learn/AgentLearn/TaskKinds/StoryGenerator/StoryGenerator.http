@@ -1,21 +1,21 @@
 @AgentLearn_HostAddress = http://localhost:5282
 
-### Story about Alice (HITL provides the character name)
+### Generate a story (character name will be prompted on console)
 POST {{AgentLearn_HostAddress}}/task
 Content-Type: application/json
 
 {
-  "task": "Alice",
+  "task": "Write me a story",
   "mode": "Single",
   "kind": "StoryGenerator"
 }
 
-### Story about Captain Zorb
+### Another story request
 POST {{AgentLearn_HostAddress}}/task
 Content-Type: application/json
 
 {
-  "task": "Captain Zorb",
+  "task": "Tell me a tale of adventure",
   "mode": "Single",
   "kind": "StoryGenerator"
 }
@@ -25,7 +25,7 @@ POST {{AgentLearn_HostAddress}}/task
 Content-Type: application/json
 
 {
-  "task": "Alice",
+  "task": "Write me a story",
   "mode": "Sequential",
   "kind": "StoryGenerator"
 }
