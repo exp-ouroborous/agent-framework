@@ -195,16 +195,14 @@ public class StoryGeneratorHandler(IServiceProvider serviceProvider, ILogger<Sto
             throw new NotSupportedException($"StoryGenerator only supports Single mode, got '{request.Mode}'.");
         }
 
-        logger.LogDebug("StoryWorkflow started — character: '{Name}'", request.Task);
-
         Workflow workflow = serviceProvider.GetRequiredKeyedService<Workflow>("StoryWorkflow");
-        StoryOutput result = await ExecuteWorkflowAsync(workflow, request.Task);
+        StoryOutput result = await ExecuteWorkflowAsync(workflow);
 
         logger.LogDebug("StoryWorkflow finished — result: '{Result}'", result.Story);
         return result.ToString();
     }
 
-    private async Task<StoryOutput> ExecuteWorkflowAsync(Workflow workflow, string characterName)
+    private async Task<StoryOutput> ExecuteWorkflowAsync(Workflow workflow)
     {
         await using StreamingRun run = await InProcessExecution.StreamAsync(workflow, "What is the character's name?");
 
@@ -214,6 +212,8 @@ public class StoryGeneratorHandler(IServiceProvider serviceProvider, ILogger<Sto
             switch (evt)
             {
                 case RequestInfoEvent requestInfo:
+                    Console.Write("Enter character name: ");
+                    string characterName = Console.ReadLine()?.Trim() ?? "Unknown";
                     logger.LogDebug("HITL request received — providing character name: '{Name}'", characterName);
                     await run.SendResponseAsync(requestInfo.Request.CreateResponse(characterName));
                     break;
