@@ -191,37 +191,18 @@ Open Jaeger UI at http://localhost:16686 and select service "AgentLearn" to view
 - Tool invocations
 - Workflow orchestration
 
-## Known .NET DevUI Gaps
+## Known .NET Gaps
 
-The DevUI frontend is shared between Python and .NET backends, but the .NET backend has several features that are not yet implemented. These are tracked upstream in [microsoft/agent-framework#2084](https://github.com/microsoft/agent-framework/issues/2084).
+Gaps discovered while building this project. Each entry links to the upstream issue and notes when it was last observed.
 
-### Traces tab shows "No Data"
+### DevUI
 
-The DevUI Traces tab requires an instrumentation pipeline that only exists in the Python backend. The .NET DevUI hardcodes `capabilities["tracing"] = false` in `MetaApiExtensions.cs`. OTel traces are collected and exported (to Jaeger via OTLP), but DevUI cannot display them inline. Use Jaeger at `http://localhost:16686` instead.
+The DevUI frontend is shared between Python and .NET, but several features only work on the Python backend. Tracked in [#2084](https://github.com/microsoft/agent-framework/issues/2084).
 
-- Confirmed by maintainer @victordibia: *"Currently this has been tested mostly in python. There is some work to be done to ensure OTel works for .NET backend."*
-
-### Tools tab shows "No Data"
-
-Tool invocations within agents (e.g. `GetDayOfYear`, `GetLuckyNumber`) are not surfaced in the DevUI Tools tab. The tab depends on the same tracing infrastructure as the Traces tab. Tool calls *do* execute and appear in Jaeger traces, but DevUI has no visibility into them on .NET.
-
-- See also [#2744](https://github.com/microsoft/agent-framework/issues/2744) — tool call rendering in non-streaming mode
-- See also [#3082](https://github.com/microsoft/agent-framework/issues/3082) — tool calls not shown even in Python streaming mode
-
-### Inner agent details not visible
-
-When an agent runs inside an executor (e.g. `ChatClientAgent` bound via `BindAsExecutor`), DevUI does not show the agent's internal tool calls, intermediate messages, or reasoning. Only the final executor output is visible. This is called out explicitly in [#2084](https://github.com/microsoft/agent-framework/issues/2084).
-
-### Custom executors require Chat Protocol support
-
-Non-agentic executors must handle both `List<ChatMessage>` and `TurnToken` inputs to work in DevUI. Without this dual-protocol support, DevUI cannot drive the executor. This is why `JokeInputExecutor` and `StoryNameBridgeExecutor` accept both typed inputs and chat messages.
-
-### Conversation memory not persisted
-
-DevUI does not maintain chat history / agent thread across interactions ([#3484](https://github.com/microsoft/agent-framework/issues/3484)). Each conversation starts fresh.
-
-### Workarounds
-
-- **OTel traces**: Use Jaeger (`./run.sh` starts it automatically) or Aspire Dashboard
-- **Tool call visibility**: Add logging middleware (see `UseToolInvocationLogging` in `Extensions/`) and watch server console output
-- **Executor compatibility**: Implement dual-protocol handlers (`List<ChatMessage>` + `TurnToken`) in custom executors
+| Gap | Details | Workaround | Last observed |
+|-----|---------|------------|---------------|
+| **Traces tab empty** | .NET DevUI hardcodes `capabilities["tracing"] = false`. The instrumentation pipeline only exists in Python. Confirmed by maintainer @victordibia. | Use Jaeger at `http://localhost:16686` or Aspire Dashboard | 2026-02-15 |
+| **Tools tab empty** | Tool invocations (e.g. `GetDayOfYear`) are not surfaced. Depends on the same missing tracing infrastructure. See also [#2744](https://github.com/microsoft/agent-framework/issues/2744), [#3082](https://github.com/microsoft/agent-framework/issues/3082). | Add logging middleware (`UseToolInvocationLogging`) and watch console output | 2026-02-15 |
+| **Inner agent details hidden** | When `ChatClientAgent` runs inside an executor via `BindAsExecutor`, DevUI shows only the final output — no tool calls, intermediate messages, or reasoning. | Check Jaeger traces for full call chain | 2026-02-15 |
+| **Custom executors need Chat Protocol** | Non-agentic executors must handle `List<ChatMessage>` + `TurnToken` to work in DevUI, not just typed inputs. | Implement dual-protocol route handlers (see `JokeInputExecutor`, `StoryNameBridgeExecutor`) | 2026-02-15 |
+| **Conversation memory not persisted** | Chat history / agent thread resets on each interaction. [#3484](https://github.com/microsoft/agent-framework/issues/3484) | None — each DevUI conversation starts fresh | 2026-02-15 |
