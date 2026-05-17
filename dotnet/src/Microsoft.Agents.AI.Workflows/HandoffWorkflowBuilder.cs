@@ -20,6 +20,7 @@ internal static class DiagnosticConstants
 }
 
 /// <inheritdoc/>
+[ExcludeFromCodeCoverage] // This is obsolete, and 1:1 equivalent to HandoffWorkflowBuilder (no "s")
 [Obsolete("Prefer HandoffWorkflowBuilder (no 's') instead, which has the same API but the preferred name. This will be removed in a future release before GA.")]
 #pragma warning disable MAAIW001 // Type is for evaluation purposes only and is subject to change or removal in future updates. Suppress this diagnostic to proceed.
 public sealed class HandoffsWorkflowBuilder(AIAgent initialAgent) : HandoffWorkflowBuilderCore<HandoffsWorkflowBuilder>(initialAgent)
@@ -53,6 +54,8 @@ public class HandoffWorkflowBuilderCore<TBuilder> where TBuilder : HandoffWorkfl
     private bool _emitAgentResponseUpdateEvents;
     private HandoffToolCallFilteringBehavior _toolCallFilteringBehavior = HandoffToolCallFilteringBehavior.HandoffOnly;
     private bool _returnToPrevious;
+    private string? _name;
+    private string? _description;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="HandoffsWorkflowBuilder"/> class with no handoff relationships.
@@ -93,6 +96,20 @@ public class HandoffWorkflowBuilderCore<TBuilder> where TBuilder : HandoffWorkfl
     public TBuilder WithHandoffInstructions(string? instructions)
     {
         this.HandoffInstructions = instructions ?? DefaultHandoffInstructions;
+        return (TBuilder)this;
+    }
+
+    /// <inheritdoc cref="WorkflowBuilder.WithName(string)"/>
+    public TBuilder WithName(string name)
+    {
+        this._name = name;
+        return (TBuilder)this;
+    }
+
+    /// <inheritdoc cref="WorkflowBuilder.WithDescription(string)"/>
+    public TBuilder WithDescription(string description)
+    {
+        this._description = description;
         return (TBuilder)this;
     }
 
@@ -329,7 +346,16 @@ public class HandoffWorkflowBuilderCore<TBuilder> where TBuilder : HandoffWorkfl
             builder.AddEdge(start, executors[this._initialAgent.Id]);
         }
 
-        // Build the workflow.
+        if (!string.IsNullOrWhiteSpace(this._name))
+        {
+            builder.WithName(this._name);
+        }
+
+        if (!string.IsNullOrWhiteSpace(this._description))
+        {
+            builder.WithDescription(this._description);
+        }
+
         return builder.WithOutputFrom(end).Build();
     }
 }

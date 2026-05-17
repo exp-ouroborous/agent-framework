@@ -582,7 +582,7 @@ def test_sample_peak_renderer_rss_mb_uses_browser_process_tree(
 def memory_regression_server() -> Generator[tuple[str, str]]:
     """Start DevUI with a synthetic streaming agent and yield the base URL plus entity ID."""
 
-    server = DevServer(host="127.0.0.1", port=0)
+    server = DevServer(host="127.0.0.1", port=0, auth_enabled=False)
     server.register_entities([
         MemoryStressAgent(
             id="memory-stream-agent",
@@ -655,7 +655,13 @@ async def test_devui_streaming_renderer_memory_is_bounded(
         )
 
         try:
-            websocket_url = await _get_devtools_websocket_url(debug_port)
+            try:
+                websocket_url = await _get_devtools_websocket_url(debug_port)
+            except RuntimeError as exc:
+                return_code = browser_process.poll()
+                if return_code is not None:
+                    pytest.skip(f"Chromium exited before DevTools became available (code {return_code}).")
+                pytest.skip(str(exc))
 
             async with websocket_connect(websocket_url, max_size=None) as websocket:
                 client = _CDPClient(websocket)
