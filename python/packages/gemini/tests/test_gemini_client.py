@@ -9,7 +9,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agent_framework import Content, FunctionTool, Message
+from agent_framework import Agent, Content, FunctionTool, Message
 from google.genai import types
 from pydantic import BaseModel
 
@@ -285,8 +285,10 @@ def test_vertex_ai_requires_project_and_location_together(monkeypatch: pytest.Mo
         GeminiChatClient(model="gemini-2.5-flash")
 
 
-async def test_missing_model_raises_on_get_response() -> None:
+async def test_missing_model_raises_on_get_response(monkeypatch: pytest.MonkeyPatch) -> None:
     """Raises ValueError at call time when no model is set on the client or in options."""
+    monkeypatch.delenv("GEMINI_MODEL", raising=False)
+    monkeypatch.delenv("GOOGLE_MODEL", raising=False)
     client, mock = _make_gemini_client(model=None)  # type: ignore[arg-type]
     mock.aio.models.generate_content = AsyncMock()
 
@@ -913,6 +915,20 @@ async def test_response_format_populates_value_on_chat_response() -> None:
     assert response.value == Reply(text="hello")
 
 
+async def test_response_format_mapping_populates_value_on_chat_response() -> None:
+    """When response_format is a JSON schema mapping, ChatResponse.value must parse the response text."""
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text='{"text": "hello"}')]))
+    schema = {"type": "object", "properties": {"text": {"type": "string"}}}
+
+    response = await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={"response_format": schema},
+    )
+
+    assert response.value == {"text": "hello"}
+
+
 async def test_response_schema_added_to_config() -> None:
     """Sets both response_mime_type and the raw schema on the config when response_schema is given."""
     client, mock = _make_gemini_client()
@@ -927,6 +943,284 @@ async def test_response_schema_added_to_config() -> None:
     config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
     assert config.response_mime_type == "application/json"
     assert config.response_schema == schema
+
+
+async def test_response_format_raw_json_schema_added_to_config() -> None:
+    """For declarative outputSchema, response_format may already be a raw JSON schema mapping."""
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text='{"answer": "hello"}')]))
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string", "description": "The answer."}},
+        "required": ["answer"],
+    }
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={"response_format": schema},
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_schema == schema
+
+
+async def test_agent_default_options_response_format_raw_schema_added_to_config() -> None:
+    """Agent default_options is the path used by declarative outputSchema."""
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text='{"answer": "hello"}')]))
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
+    agent = Agent(client=client, default_options={"response_format": schema})
+
+    await agent.run("Hi")
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_schema == schema
+
+
+async def test_response_format_complex_raw_json_schema_preserved() -> None:
+    """Nested declarative schemas should be forwarded without losing shape or constraints."""
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text='{"answer": "ok"}')]))
+    schema = {
+        "type": "object",
+        "properties": {
+            "answer": {"type": "string"},
+            "citations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "source": {"type": "string"},
+                        "confidence": {"type": "number"},
+                    },
+                    "required": ["source"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+
+    await client.get_response(
+        messages=[
+            Message(
+                role="user",
+                contents=[
+                    Content.from_text(
+                        "Summarize a long document while preserving citation metadata.\n" + ("context\n" * 128)
+                    )
+                ],
+            )
+        ],
+        options={"response_format": schema},
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    assert config.response_schema == schema
+
+
+async def test_response_format_json_schema_envelope_added_to_config() -> None:
+    """OpenAI-style json_schema envelopes should still provide Gemini with the inner schema."""
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text='{"answer": "hello"}')]))
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={"response_format": {"type": "json_schema", "json_schema": {"name": "Answer", "schema": schema}}},
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_schema == schema
+
+
+async def test_response_format_format_envelope_added_to_config() -> None:
+    """Responses-style format envelopes should also provide Gemini with the nested schema."""
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text='{"answer": "hello"}')]))
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={"response_format": {"format": {"type": "json_schema", "name": "Answer", "schema": schema}}},
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_schema == schema
+
+
+async def test_response_format_direct_schema_key_added_to_config() -> None:
+    """Provider-normalized mappings with a direct schema key should be accepted."""
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text='{"answer": "hello"}')]))
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={"response_format": {"schema": schema}},
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_schema == schema
+
+
+async def test_response_format_json_schema_envelope_preserves_empty_schema() -> None:
+    """An explicitly empty JSON schema is still a schema and should not be dropped as falsy."""
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text="{}")]))
+    schema: dict[str, Any] = {}
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={"response_format": {"type": "json_schema", "json_schema": {"name": "AnyJson", "schema": schema}}},
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    assert config.response_schema == schema
+
+
+async def test_response_format_anyof_raw_schema_added_to_config() -> None:
+    """Raw schemas without a type should still be recognized when they use JSON Schema keywords."""
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text='"ok"')]))
+    schema = {"anyOf": [{"type": "string"}, {"type": "number"}]}
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={"response_format": schema},
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    assert config.response_schema == schema
+
+
+async def test_response_format_union_type_raw_schema_added_to_config() -> None:
+    """JSON Schema union type arrays should be treated as raw schemas."""
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text='{"answer": "hello"}')]))
+    schema = {"type": ["object", "null"], "properties": {"answer": {"type": "string"}}}
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={"response_format": schema},
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    assert config.response_schema == schema
+
+
+async def test_response_format_json_object_does_not_set_schema() -> None:
+    """A JSON-object response_format requests JSON output but is not itself a Gemini response schema."""
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text="{}")]))
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={"response_format": {"type": "json_object"}},
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_schema is None
+
+
+async def test_response_format_json_schema_without_inner_schema_does_not_set_schema() -> None:
+    """A json_schema envelope without a schema should not be mistaken for a raw JSON schema."""
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text="{}")]))
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={"response_format": {"type": "json_schema", "json_schema": {"name": "MissingSchema"}}},
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_schema is None
+
+
+async def test_response_schema_takes_precedence_over_response_format_schema() -> None:
+    """An explicit Gemini response_schema should win when both schema options are present."""
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text="{}")]))
+    response_format_schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    response_schema = {"type": "object", "properties": {"id": {"type": "integer"}}}
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={"response_format": response_format_schema, "response_schema": response_schema},
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    assert config.response_schema == response_schema
+
+
+async def test_response_format_raw_schema_kept_with_tools() -> None:
+    """Structured output must still reach Gemini when function tools are present."""
+
+    def calculator(expression: str) -> str:
+        """Evaluate a simple expression."""
+        return expression
+
+    tool = FunctionTool(name="calculator", func=calculator)
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text='{"answer": "4"}')]))
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("What is 2 + 2?")])],
+        options={"tools": [tool], "response_format": schema},
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    assert config.response_schema == schema
+    assert config.tools is not None
+    assert config.tools[0].function_declarations[0].name == "calculator"
+
+
+async def test_streaming_response_format_raw_schema_added_to_config() -> None:
+    """Streaming requests use the same config path and should also forward raw schema mappings."""
+    client, mock = _make_gemini_client()
+    chunks = [_make_response([_make_part(text='{"answer": "hello"}')], finish_reason="STOP")]
+    mock.aio.models.generate_content_stream = AsyncMock(return_value=_async_iter(chunks))
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+
+    stream = client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={"response_format": schema},
+        stream=True,
+    )
+    async for _ in stream:
+        pass
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content_stream.call_args.kwargs["config"]
+    assert config.response_mime_type == "application/json"
+    assert config.response_schema == schema
+
+
+async def test_streaming_response_format_mapping_populates_final_value() -> None:
+    """Streaming responses should preserve mapping response_format for final value parsing."""
+    client, mock = _make_gemini_client()
+    chunks = [_make_response([_make_part(text='{"answer": "hello"}')], finish_reason="STOP")]
+    mock.aio.models.generate_content_stream = AsyncMock(return_value=_async_iter(chunks))
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+
+    stream = client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={"response_format": schema},
+        stream=True,
+    )
+    async for _ in stream:
+        pass
+
+    final = await stream.get_final_response()
+    assert final.value == {"answer": "hello"}
 
 
 async def test_streaming_response_format_passed_to_build_response_stream() -> None:
@@ -1153,6 +1447,86 @@ async def test_unknown_tool_choice_mode_is_ignored() -> None:
 
     config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
     assert not hasattr(config, "tool_config") or config.tool_config is None
+
+
+async def test_tool_choice_auto_with_allowed_tools_uses_VALIDATED() -> None:
+    """Maps auto + allowed_tools to FunctionCallingConfigMode.VALIDATED with allowed_function_names."""
+    tool = _make_dummy_tool()
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text="Hi")]))
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={
+            "tools": [tool],
+            "tool_choice": {"mode": "auto", "allowed_tools": ["dummy", "other"]},
+        },
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    function_calling_config = config.tool_config.function_calling_config
+    assert function_calling_config.mode == "VALIDATED"
+    assert function_calling_config.allowed_function_names == ["dummy", "other"]
+
+
+async def test_tool_choice_auto_with_empty_allowed_tools_uses_VALIDATED() -> None:
+    """Maps auto + empty allowed_tools to VALIDATED with empty allowed_function_names."""
+    tool = _make_dummy_tool()
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text="Hi")]))
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={
+            "tools": [tool],
+            "tool_choice": {"mode": "auto", "allowed_tools": []},
+        },
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    function_calling_config = config.tool_config.function_calling_config
+    assert function_calling_config.mode == "VALIDATED"
+    assert function_calling_config.allowed_function_names == []
+
+
+async def test_tool_choice_required_with_allowed_tools_uses_ANY() -> None:
+    """Maps required + allowed_tools to ANY with allowed_function_names."""
+    tool = _make_dummy_tool()
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text="Hi")]))
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={
+            "tools": [tool],
+            "tool_choice": {"mode": "required", "allowed_tools": ["dummy"]},
+        },
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    function_calling_config = config.tool_config.function_calling_config
+    assert function_calling_config.mode == "ANY"
+    assert function_calling_config.allowed_function_names == ["dummy"]
+
+
+async def test_tool_choice_required_function_name_takes_precedence_over_allowed_tools() -> None:
+    """When both required_function_name and allowed_tools are present, required_function_name wins."""
+    tool = _make_dummy_tool()
+    client, mock = _make_gemini_client()
+    mock.aio.models.generate_content = AsyncMock(return_value=_make_response([_make_part(text="Hi")]))
+
+    await client.get_response(
+        messages=[Message(role="user", contents=[Content.from_text("Hi")])],
+        options={
+            "tools": [tool],
+            "tool_choice": {"mode": "required", "required_function_name": "dummy", "allowed_tools": ["other"]},
+        },
+    )
+
+    config: types.GenerateContentConfig = mock.aio.models.generate_content.call_args.kwargs["config"]
+    function_calling_config = config.tool_config.function_calling_config
+    assert function_calling_config.mode == "ANY"
+    assert function_calling_config.allowed_function_names == ["dummy"]
 
 
 # built-in tool factories

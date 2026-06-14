@@ -145,6 +145,9 @@ class OpenAIChatCompletionOptions(ChatOptions[ResponseModelT], Generic[ResponseM
     logprobs: bool
     top_logprobs: int
     prediction: Prediction
+    verbosity: Literal["low", "medium", "high"]
+    """Output verbosity for GPT-5 family models. Lower values yield shorter responses.
+    See: https://developers.openai.com/cookbook/examples/gpt-5/gpt-5_new_params_and_tools#1-verbosity-parameter"""
 
 
 OpenAIChatCompletionOptionsT = TypeVar(
@@ -662,6 +665,12 @@ class RawOpenAIChatCompletionClient(  # type: ignore[misc]
                         "type": "function",
                         "function": {"name": func_name},
                     }
+                elif mode in ("auto", "required") and tool_mode.get("allowed_tools") is not None:
+                    logger.warning(
+                        "allowed_tools is not supported by the Chat Completions API; "
+                        "the setting will be ignored. Use OpenAIChatClient (Responses API) instead."
+                    )
+                    run_options["tool_choice"] = mode
                 else:
                     run_options["tool_choice"] = mode
 
@@ -719,10 +728,16 @@ class RawOpenAIChatCompletionClient(  # type: ignore[misc]
 
         for choice in chunk.choices:
             chunk_metadata.update(self._get_metadata_from_chat_choice(choice))
-            contents.extend(self._parse_tool_calls_from_openai(choice))
             if choice.finish_reason:
                 finish_reason = choice.finish_reason  # type: ignore[assignment]
 
+            # Some OpenAI-compatible providers (e.g. Azure) send `"delta": null`
+            # on finish chunks instead of the spec-compliant `"delta": {}`.
+            # Guard here so all content-parsing below can assume delta is present.
+            if choice.delta is None:  # pyright: ignore[reportUnnecessaryComparison]
+                continue
+
+            contents.extend(self._parse_tool_calls_from_openai(choice))
             if text_content := self._parse_text_from_openai(choice):
                 contents.append(text_content)
             if reasoning_details := getattr(choice.delta, "reasoning_details", None):
@@ -773,13 +788,13 @@ class RawOpenAIChatCompletionClient(  # type: ignore[misc]
     def _get_metadata_from_chat_response(self, response: ChatCompletion) -> dict[str, Any]:
         """Get metadata from a chat response."""
         return {
-            "system_fingerprint": response.system_fingerprint,
+            "system_fingerprint": getattr(response, "system_fingerprint", None),
         }
 
     def _get_metadata_from_streaming_chat_response(self, response: ChatCompletionChunk) -> dict[str, Any]:
         """Get metadata from a streaming chat response."""
         return {
-            "system_fingerprint": response.system_fingerprint,
+            "system_fingerprint": getattr(response, "system_fingerprint", None),
         }
 
     def _get_metadata_from_chat_choice(self, choice: Choice | ChunkChoice) -> dict[str, Any]:

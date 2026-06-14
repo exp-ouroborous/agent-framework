@@ -5,7 +5,6 @@ using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using Azure.AI.Projects.Agents;
 using Microsoft.Extensions.AI;
-using Microsoft.Shared.DiagnosticIds;
 using OpenAI.Responses;
 
 #pragma warning disable OPENAI001
@@ -27,7 +26,6 @@ namespace Microsoft.Agents.AI.Foundry;
 /// <c>FoundryAITool.CreateOpenApiTool(definition)</c>
 /// </para>
 /// </remarks>
-[Experimental(DiagnosticIds.Experiments.AIOpenAIResponses)]
 public static class FoundryAITool
 {
     /// <summary>
@@ -111,6 +109,16 @@ public static class FoundryAITool
     /// <returns>An <see cref="AITool"/> for A2A communication.</returns>
     public static AITool CreateA2ATool(Uri baseUri, string? agentCardPath = null)
         => ProjectsAgentTool.CreateA2ATool(baseUri, agentCardPath).AsAITool();
+
+    /// <summary>
+    /// Creates an <see cref="AITool"/> marker that references a Foundry Toolbox by name so
+    /// the hosted server side can resolve and expose its MCP tools for a single request.
+    /// </summary>
+    /// <param name="toolboxName">The Foundry toolbox name.</param>
+    /// <param name="version">Optional pinned toolbox version. When <see langword="null"/>, the project's default version is used.</param>
+    /// <returns>An <see cref="AITool"/> marker backed by <see cref="HostedMcpToolboxAITool"/>.</returns>
+    public static AITool CreateHostedMcpToolbox(string toolboxName, string? version = null)
+        => new HostedMcpToolboxAITool(toolboxName, version);
 
     // --- OpenAI SDK ResponseTool factories ---
 

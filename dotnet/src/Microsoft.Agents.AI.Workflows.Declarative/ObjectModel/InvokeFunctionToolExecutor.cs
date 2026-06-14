@@ -1,5 +1,6 @@
 ﻿// Copyright (c) Microsoft. All rights reserved.
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
@@ -12,6 +13,7 @@ using Microsoft.Agents.AI.Workflows.Declarative.Kit;
 using Microsoft.Agents.AI.Workflows.Declarative.PowerFx;
 using Microsoft.Agents.ObjectModel;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
 using Microsoft.Shared.Diagnostics;
 
 namespace Microsoft.Agents.AI.Workflows.Declarative.ObjectModel;
@@ -26,6 +28,13 @@ internal sealed class InvokeFunctionToolExecutor(
     WorkflowFormulaState state) :
     DeclarativeActionExecutor<InvokeFunctionTool>(model, state)
 {
+    private const string ApprovalSnapshotStateKey = nameof(_approvalSnapshot);
+
+    /// <summary>
+    /// Snapshot of evaluated parameters at approval-request time.
+    /// </summary>
+    private ApprovalSnapshot? _approvalSnapshot;
+
     /// <summary>
     /// Step identifiers for the function tool invocation workflow.
     /// </summary>
@@ -68,6 +77,10 @@ internal sealed class InvokeFunctionToolExecutor(
         // If approval is required, add user input request content
         if (requireApproval)
         {
+            // Snapshot the evaluated parameters.
+            // If state mutates during the approval window, the approved values are used on resume.
+            this._approvalSnapshot = new ApprovalSnapshot(functionName, arguments);
+
             requestMessage.Contents.Add(new ToolApprovalRequestContent(this.Id, functionCall));
         }
 
@@ -103,6 +116,24 @@ internal sealed class InvokeFunctionToolExecutor(
         FunctionResultContent? matchingResult = functionResults
             .FirstOrDefault(r => r.CallId == this.Id);
 
+        // When the caller approved an approval-required function call but didn't execute it
+        // locally (the hosted Foundry scenario, where mcp_approval_response is converted to a
+        // ToolApprovalResponseContent only), invoke the registered AIFunction here so that the
+        // declarative workflow can capture the result and continue (e.g. for downstream
+        // SendActivity/PropertyPath consumers like {Local.Result}).
+        if (matchingResult is null)
+        {
+            ToolApprovalResponseContent? approval = response.Messages
+                .SelectMany(m => m.Contents)
+                .OfType<ToolApprovalResponseContent>()
+                .FirstOrDefault(r => r.RequestId == this.Id);
+
+            if (approval is { Approved: true })
+            {
+                matchingResult = await this.InvokeRegisteredFunctionAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         if (matchingResult is not null)
         {
             // Store the result in output variable
@@ -136,6 +167,31 @@ internal sealed class InvokeFunctionToolExecutor(
 
         // Completes the action after processing the function result.
         await context.RaiseCompletionEventAsync(this.Model, cancellationToken).ConfigureAwait(false);
+
+        // Clear the approval snapshot after the action completes so a subsequent
+        // execution of the same executor instance doesn't reuse stale data.
+        this._approvalSnapshot = null;
+        await context.QueueStateUpdateAsync<ApprovalSnapshot?>(ApprovalSnapshotStateKey, null, null, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Persists the approval snapshot to workflow state so it survives checkpoint/restore cycles.
+    /// </remarks>
+    protected override async ValueTask OnCheckpointingAsync(IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        await context.QueueStateUpdateAsync(ApprovalSnapshotStateKey, this._approvalSnapshot, null, cancellationToken).ConfigureAwait(false);
+        await base.OnCheckpointingAsync(context, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Restores the approval snapshot from workflow state after a checkpoint restore.
+    /// </remarks>
+    protected override async ValueTask OnCheckpointRestoredAsync(IWorkflowContext context, CancellationToken cancellationToken = default)
+    {
+        await base.OnCheckpointRestoredAsync(context, cancellationToken).ConfigureAwait(false);
+        this._approvalSnapshot = await context.ReadStateAsync<ApprovalSnapshot>(ApprovalSnapshotStateKey, null, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -241,6 +297,64 @@ internal sealed class InvokeFunctionToolExecutor(
         return conversationIdValue.Length == 0 ? null : conversationIdValue;
     }
 
+    private async ValueTask<FunctionResultContent?> InvokeRegisteredFunctionAsync(CancellationToken cancellationToken)
+    {
+        string functionName;
+        Dictionary<string, object?>? arguments;
+
+        if (this._approvalSnapshot is { } snapshot)
+        {
+            // Use the snapshot captured at approval-request time so we invoke exactly what
+            // the user approved, even if Power Fx state has mutated during the approval window.
+            functionName = snapshot.FunctionName;
+            arguments = snapshot.Arguments;
+        }
+        else
+        {
+            // Fallback for checkpoints created before approval snapshots were introduced.
+            this.Logger.LogWarning("Approval snapshot missing for '{ActionId}'; falling back to expression re-evaluation.", this.Id);
+            functionName = this.GetFunctionName();
+            arguments = this.GetArguments();
+        }
+
+        AIFunction? function = agentProvider.Functions?.FirstOrDefault(
+            f => string.Equals(f.Name, functionName, StringComparison.Ordinal));
+
+        if (function is null)
+        {
+            return new FunctionResultContent(this.Id, result: null)
+            {
+                Exception = new InvalidOperationException(
+                    $"Function '{functionName}' is not registered with the agent provider."),
+            };
+        }
+
+        AIFunctionArguments? functionArguments = arguments is null ? null : new AIFunctionArguments(arguments.NormalizePortableValues());
+
+        object? result;
+        try
+        {
+            result = await function.InvokeAsync(functionArguments, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new FunctionResultContent(this.Id, result: null) { Exception = ex };
+        }
+
+        // Match FunctionInvokingChatClient's serialization: pass strings through as-is and
+        // JSON-serialize anything else so structured results remain consumable by downstream
+        // PropertyPath consumers such as {Local.RefundResult}. Use AIJsonUtilities so the
+        // same trim/AOT-friendly serializer chain used elsewhere in the framework is applied.
+        string serialized = result switch
+        {
+            null => string.Empty,
+            string s => s,
+            _ => JsonSerializer.Serialize(result, AIJsonUtilities.DefaultOptions.GetTypeInfo(result.GetType())),
+        };
+
+        return new FunctionResultContent(this.Id, serialized);
+    }
+
     private bool GetRequireApproval()
     {
         if (this.Model.RequireApproval is null)
@@ -253,12 +367,16 @@ internal sealed class InvokeFunctionToolExecutor(
 
     private bool GetAutoSendValue()
     {
-        if (this.Model.Output?.AutoSend is null)
+        // InvokeToolOutput.AutoSend is never null — it returns a literal-false default
+        // when the YAML omits the field. Use AutoSendIsDefaultValue to distinguish an
+        // explicit autoSend value from the implicit default, and treat the implicit
+        // default as autoSend = true (the historical behavior).
+        if (this.Model.Output is { AutoSendIsDefaultValue: false } output)
         {
-            return true;
+            return this.Evaluator.GetValue(output.AutoSend).Value;
         }
 
-        return this.Evaluator.GetValue(this.Model.Output.AutoSend).Value;
+        return true;
     }
 
     private Dictionary<string, object?>? GetArguments()
@@ -276,4 +394,13 @@ internal sealed class InvokeFunctionToolExecutor(
 
         return result;
     }
+
+    /// <summary>
+    /// Stores the evaluated parameters at approval-request time so that
+    /// <see cref="CaptureResponseAsync"/> uses the values the user reviewed,
+    /// even if <see cref="WorkflowFormulaState"/> mutates during the approval window.
+    /// </summary>
+    internal sealed record ApprovalSnapshot(
+        string FunctionName,
+        Dictionary<string, object?>? Arguments);
 }

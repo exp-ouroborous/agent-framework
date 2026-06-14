@@ -21,6 +21,21 @@ When making changes to a package, check if the following need updates:
 - The package's `AGENTS.md` file (adding/removing/renaming public APIs, architecture changes, import path changes)
 - The agent skills in `.github/skills/` if conventions, commands, or workflows change
 
+At the end of every run, re-read `AGENTS.md` and the relevant skill files and
+update any guidance that the conversation revealed to be out of date,
+incomplete, or misleading (renamed files, changed commands, new conventions
+the user confirmed, etc.). **Before adding a new principle or rule, ask the
+user whether they want it captured as a durable principle** — do not invent
+team norms from a single conversation without explicit confirmation.
+
+## Terminology
+
+- **Avoid "GA" for Agent Framework code.** Reserve *GA* for hosted services
+  (e.g. "the Foundry service is GA"). For Agent Framework packages, features,
+  and APIs use **"released"** or **"stable"** depending on context — these
+  match the feature-lifecycle stages documented in the
+  `python-feature-lifecycle` skill.
+
 ## Pull Request Description Guidance
 
 When preparing a PR description:
@@ -69,6 +84,7 @@ python/
 
 ### Azure Integrations
 - [foundry](packages/foundry/README.md) - Microsoft Foundry chat, agent, memory, and embedding integrations
+- [azure-contentunderstanding](packages/azure-contentunderstanding/AGENTS.md) - Azure Content Understanding context provider
 - [azure-ai-search](packages/azure-ai-search/AGENTS.md) - Azure AI Search RAG
 - [azure-cosmos](packages/azure-cosmos/AGENTS.md) - Azure Cosmos DB-backed history provider
 - [azurefunctions](packages/azurefunctions/AGENTS.md) - Azure Functions hosting
@@ -92,3 +108,4 @@ python/
 
 ### Experimental
 - [lab](packages/lab/AGENTS.md) - Experimental features
+- [monty](packages/monty/AGENTS.md) - Monty-backed CodeAct integrations (alpha)

@@ -25,16 +25,25 @@ from agent_framework._evaluation import (
 from agent_framework._workflows._workflow import WorkflowRunResult
 from openai import AsyncOpenAI
 
+from agent_framework_foundry import GeneratedEvaluatorRef
 from agent_framework_foundry._foundry_evals import (
+    _AGENT_EVALUATORS,
+    _BUILTIN_EVALUATORS,
+    _TOOL_EVALUATORS,
     FoundryEvals,
     _build_item_schema,
     _build_testing_criteria,
     _extract_per_evaluator,
     _extract_result_counts,
+    _extract_rubric_scores,
+    _fetch_output_items,
     _filter_tool_evaluators,
+    _poll_eval_run,
     _resolve_default_evaluators,
     _resolve_evaluator,
     _resolve_openai_client,
+    evaluate_foundry_target,
+    evaluate_traces,
 )
 
 
@@ -745,7 +754,12 @@ class TestBuildTestingCriteria:
         assert "conversation" not in criteria[1]["data_mapping"]
 
     def test_tool_evaluator_includes_tool_definitions(self) -> None:
-        criteria = _build_testing_criteria(["relevance", "tool_call_accuracy"], "gpt-4o", include_data_mapping=True)
+        criteria = _build_testing_criteria(
+            ["relevance", "tool_call_accuracy"],
+            "gpt-4o",
+            include_data_mapping=True,
+            include_tool_definitions=True,
+        )
         # relevance: string query/response
         assert criteria[0]["data_mapping"]["query"] == "{{item.query}}"
         assert criteria[0]["data_mapping"]["response"] == "{{item.response}}"
@@ -762,12 +776,27 @@ class TestBuildTestingCriteria:
             assert c["data_mapping"]["query"] == "{{item.query_messages}}", f"{c['name']}"
             assert c["data_mapping"]["response"] == "{{item.response_messages}}", f"{c['name']}"
 
+    def test_agent_evaluators_include_tool_definitions_when_tools_present(self) -> None:
+        agent_evals = ["task_adherence", "intent_resolution", "task_completion", "task_navigation_efficiency"]
+        criteria = _build_testing_criteria(
+            agent_evals,
+            "gpt-4o",
+            include_data_mapping=True,
+            include_tool_definitions=True,
+        )
+        for c in criteria:
+            assert c["data_mapping"]["tool_definitions"] == "{{item.tool_definitions}}", f"{c['name']}"
+
     def test_quality_evaluators_use_strings(self) -> None:
         quality_evals = ["coherence", "relevance", "fluency"]
         criteria = _build_testing_criteria(quality_evals, "gpt-4o", include_data_mapping=True)
         for c in criteria:
             assert c["data_mapping"]["query"] == "{{item.query}}", f"{c['name']}"
             assert c["data_mapping"]["response"] == "{{item.response}}", f"{c['name']}"
+
+    def test_similarity_includes_ground_truth(self) -> None:
+        criteria = _build_testing_criteria(["similarity"], "gpt-4o", include_data_mapping=True)
+        assert criteria[0]["data_mapping"]["ground_truth"] == "{{item.ground_truth}}"
 
     def test_all_tool_evaluators_include_tool_definitions(self) -> None:
         tool_evals = [
@@ -777,9 +806,75 @@ class TestBuildTestingCriteria:
             "tool_output_utilization",
             "tool_call_success",
         ]
-        criteria = _build_testing_criteria(tool_evals, "gpt-4o", include_data_mapping=True)
+        criteria = _build_testing_criteria(
+            tool_evals,
+            "gpt-4o",
+            include_data_mapping=True,
+            include_tool_definitions=True,
+        )
         for c in criteria:
             assert "tool_definitions" in c["data_mapping"], f"{c['name']} missing tool_definitions"
+
+    def test_generated_evaluator_ref_pinned_version(self) -> None:
+
+        ref = GeneratedEvaluatorRef(name="my-rubric", version="1")
+        criteria = _build_testing_criteria([ref], "gpt-4o", include_data_mapping=True)
+
+        assert len(criteria) == 1
+        c = criteria[0]
+        assert c["type"] == "azure_ai_evaluator"
+        assert c["evaluator_name"] == "my-rubric"
+        assert c["evaluator_version"] == "1"
+        assert c["name"] == "my-rubric"
+        assert c["initialization_parameters"] == {"deployment_name": "gpt-4o"}
+        assert c["data_mapping"] == {
+            "query": "{{item.query_messages}}",
+            "response": "{{item.response_messages}}",
+        }
+
+    def test_generated_evaluator_ref_display_name_used_as_short(self) -> None:
+
+        ref = GeneratedEvaluatorRef(name="my-rubric", version="2", display_name="My Rubric")
+        criteria = _build_testing_criteria([ref], "gpt-4o")
+
+        assert criteria[0]["name"] == "My Rubric"
+        assert criteria[0]["evaluator_name"] == "my-rubric"
+
+    def test_generated_evaluator_ref_tool_definitions_added(self) -> None:
+
+        ref = GeneratedEvaluatorRef(name="my-rubric", version="1")
+        criteria = _build_testing_criteria(
+            [ref],
+            "gpt-4o",
+            include_data_mapping=True,
+            include_tool_definitions=True,
+        )
+
+        assert criteria[0]["data_mapping"]["tool_definitions"] == "{{item.tool_definitions}}"
+
+    def test_generated_evaluator_ref_unpinned_warns(self, caplog: pytest.LogCaptureFixture) -> None:
+        import logging
+
+        ref = GeneratedEvaluatorRef.latest("my-rubric")
+        with caplog.at_level(logging.WARNING, logger="agent_framework_foundry._foundry_evals"):
+            criteria = _build_testing_criteria([ref], "gpt-4o")
+
+        assert "evaluator_version" not in criteria[0]
+        assert any("no pinned version" in r.message for r in caplog.records)
+
+    def test_generated_evaluator_ref_mixed_with_builtins(self) -> None:
+
+        ref = GeneratedEvaluatorRef(name="my-rubric", version="1")
+        criteria = _build_testing_criteria(
+            ["relevance", ref, "task_adherence"],
+            "gpt-4o",
+            include_data_mapping=True,
+        )
+
+        assert [c["name"] for c in criteria] == ["relevance", "my-rubric", "task_adherence"]
+        assert criteria[0]["evaluator_name"] == "builtin.relevance"
+        assert criteria[1]["evaluator_name"] == "my-rubric"
+        assert criteria[2]["evaluator_name"] == "builtin.task_adherence"
 
 
 # ---------------------------------------------------------------------------
@@ -800,6 +895,10 @@ class TestBuildItemSchema:
     def test_with_tools(self) -> None:
         schema = _build_item_schema(has_tools=True)
         assert "tool_definitions" in schema["properties"]
+
+    def test_with_ground_truth(self) -> None:
+        schema = _build_item_schema(has_ground_truth=True)
+        assert "ground_truth" in schema["properties"]
 
     def test_with_context_and_tools(self) -> None:
         schema = _build_item_schema(has_context=True, has_tools=True)
@@ -1015,6 +1114,50 @@ class TestFoundryEvals:
         assert ds["type"] == "jsonl"
         assert "tool_definitions" in ds["source"]["content"][0]["item"]
 
+    async def test_evaluate_ground_truth_in_dataset(self) -> None:
+        """Items with expected_output include ground_truth in the JSONL payload."""
+        mock_client = MagicMock()
+
+        mock_eval = MagicMock()
+        mock_eval.id = "eval_gt"
+        mock_client.evals.create = AsyncMock(return_value=mock_eval)
+
+        mock_run = MagicMock()
+        mock_run.id = "run_gt"
+        mock_client.evals.runs.create = AsyncMock(return_value=mock_run)
+
+        mock_completed = MagicMock()
+        mock_completed.status = "completed"
+        mock_completed.result_counts = _rc(passed=1)
+        mock_completed.report_url = None
+        mock_completed.per_testing_criteria_results = None
+        mock_client.evals.runs.retrieve = AsyncMock(return_value=mock_completed)
+
+        items = [
+            EvalItem(
+                conversation=[Message("user", ["What is 2+2?"]), Message("assistant", ["4"])],
+                expected_output="4",
+            ),
+        ]
+
+        fe = FoundryEvals(
+            client=mock_client,
+            model="gpt-4o",
+            evaluators=[FoundryEvals.SIMILARITY],
+        )
+        await fe.evaluate(items)
+
+        # Verify ground_truth appears in JSONL data
+        run_call = mock_client.evals.runs.create.call_args
+        ds = run_call.kwargs["data_source"]
+        assert ds["type"] == "jsonl"
+        assert ds["source"]["content"][0]["item"]["ground_truth"] == "4"
+
+        # Verify item_schema includes ground_truth
+        create_call = mock_client.evals.create.call_args
+        schema = create_call.kwargs["data_source_config"]["item_schema"]
+        assert "ground_truth" in schema["properties"]
+
     async def test_evaluate_image_content_in_dataset(self) -> None:
         """Image content in conversations is preserved in the JSONL payload."""
         mock_client = MagicMock()
@@ -1189,6 +1332,29 @@ class TestFilterToolEvaluators:
                 ["tool_call_accuracy", "tool_selection"],
                 items,
             )
+
+    def test_preserves_generated_ref_when_no_tools(self) -> None:
+
+        ref = GeneratedEvaluatorRef(name="rubric", version="1")
+        items = [
+            EvalItem(conversation=[Message("user", ["q"]), Message("assistant", ["r"])]),
+        ]
+        result = _filter_tool_evaluators(
+            ["relevance", ref, "tool_call_accuracy"],
+            items,
+        )
+        assert "relevance" in result
+        assert ref in result
+        assert "tool_call_accuracy" not in result
+
+    def test_generated_ref_alone_does_not_raise(self) -> None:
+
+        ref = GeneratedEvaluatorRef(name="rubric", version="1")
+        items = [
+            EvalItem(conversation=[Message("user", ["q"]), Message("assistant", ["r"])]),
+        ]
+        result = _filter_tool_evaluators([ref], items)
+        assert result == [ref]
 
 
 # ---------------------------------------------------------------------------
@@ -1764,7 +1930,7 @@ class TestEvaluateWorkflow:
             WorkflowEvent.executor_completed("writer", [aer1]),
             WorkflowEvent.executor_invoked("reviewer", [aer1]),
             WorkflowEvent.executor_completed("reviewer", [aer2]),
-            WorkflowEvent.output("end", final_output),
+            WorkflowEvent("output", executor_id="end", data=final_output),
         ]
         wf_result = WorkflowRunResult(events, [])
 
@@ -1793,7 +1959,7 @@ class TestEvaluateWorkflow:
         events = [
             WorkflowEvent.executor_invoked("agent", "Test query"),
             WorkflowEvent.executor_completed("agent", [aer]),
-            WorkflowEvent.output("end", final_output),
+            WorkflowEvent("output", executor_id="end", data=final_output),
         ]
         wf_result = WorkflowRunResult(events, [])
 
@@ -1823,7 +1989,7 @@ class TestEvaluateWorkflow:
             WorkflowEvent.executor_completed("input-conversation", None),
             WorkflowEvent.executor_invoked("planner", "Plan trip"),
             WorkflowEvent.executor_completed("planner", [aer]),
-            WorkflowEvent.output("end", final_output),
+            WorkflowEvent("output", executor_id="end", data=final_output),
         ]
         wf_result = WorkflowRunResult(events, [])
 
@@ -1889,7 +2055,7 @@ class TestEvaluateWorkflow:
             WorkflowEvent.executor_completed("input-conversation", None),
             WorkflowEvent.executor_invoked("researcher", "What's the weather?"),
             WorkflowEvent.executor_completed("researcher", [aer]),
-            WorkflowEvent.output("end", [Message("assistant", ["Weather is sunny"])]),
+            WorkflowEvent("output", executor_id="end", data=[Message("assistant", ["Weather is sunny"])]),
         ]
         wf_result = WorkflowRunResult(events, [])
 
@@ -1987,6 +2153,102 @@ class TestEvaluateWorkflow:
                 assert "builtin.tool_call_accuracy" in eval_names, (
                     "researcher has tools — should get tool_call_accuracy"
                 )
+
+    async def test_expected_output_stamps_overall_items(self) -> None:
+        """expected_output is stamped on overall items as ground_truth in the dataset."""
+        mock_oai = self._mock_oai_client()
+
+        aer = _make_agent_exec_response("agent", "Response", ["Query"])
+        final_output = [Message("assistant", ["Final answer"])]
+
+        events = [
+            WorkflowEvent.executor_invoked("agent", "Test query"),
+            WorkflowEvent.executor_completed("agent", [aer]),
+            WorkflowEvent("output", executor_id="end", data=final_output),
+        ]
+        wf_result = WorkflowRunResult(events, [])
+
+        mock_workflow = MagicMock()
+        mock_workflow.executors = {}
+        mock_workflow.run = AsyncMock(return_value=wf_result)
+
+        results = await evaluate_workflow(
+            workflow=mock_workflow,
+            queries=["Test query"],
+            expected_output=["Expected answer"],
+            evaluators=FoundryEvals(
+                client=mock_oai,
+                model="gpt-4o",
+                evaluators=[FoundryEvals.SIMILARITY],
+            ),
+        )
+
+        assert results[0].status == "completed"
+
+        # Verify overall eval's dataset includes ground_truth
+        # The overall eval is the last evals.runs.create call
+        calls = mock_oai.evals.runs.create.call_args_list
+        overall_call = calls[-1]
+        ds = overall_call.kwargs["data_source"]
+        overall_item = ds["source"]["content"][0]["item"]
+        assert overall_item["ground_truth"] == "Expected answer"
+
+    async def test_expected_output_with_num_repetitions(self) -> None:
+        """expected_output is correctly stamped on overall items across multiple repetitions."""
+        mock_oai = self._mock_oai_client()
+
+        aer = _make_agent_exec_response("agent", "Response", ["Query"])
+        final_output = [Message("assistant", ["Final answer"])]
+
+        events = [
+            WorkflowEvent.executor_invoked("agent", "Test query"),
+            WorkflowEvent.executor_completed("agent", [aer]),
+            WorkflowEvent("output", executor_id="end", data=final_output),
+        ]
+        wf_result = WorkflowRunResult(events, [])
+
+        mock_workflow = MagicMock()
+        mock_workflow.executors = {}
+        mock_workflow.run = AsyncMock(return_value=wf_result)
+
+        results = await evaluate_workflow(
+            workflow=mock_workflow,
+            queries=["Test query"],
+            expected_output=["Expected answer"],
+            evaluators=FoundryEvals(
+                client=mock_oai,
+                model="gpt-4o",
+                evaluators=[FoundryEvals.SIMILARITY],
+            ),
+            num_repetitions=2,
+        )
+
+        assert results[0].status == "completed"
+
+        # workflow.run should be called twice (once per repetition)
+        assert mock_workflow.run.call_count == 2
+
+        # Verify all overall items have ground_truth stamped
+        calls = mock_oai.evals.runs.create.call_args_list
+        overall_call = calls[-1]
+        ds = overall_call.kwargs["data_source"]
+        items = ds["source"]["content"]
+        assert len(items) == 2
+        for item in items:
+            assert item["item"]["ground_truth"] == "Expected answer"
+
+    async def test_expected_output_length_mismatch_raises(self) -> None:
+        """Mismatched queries and expected_output lengths raise ValueError."""
+        mock_oai = MagicMock()
+        mock_workflow = MagicMock()
+
+        with pytest.raises(ValueError, match="expected_output"):
+            await evaluate_workflow(
+                workflow=mock_workflow,
+                queries=["q1", "q2"],
+                expected_output=["e1"],
+                evaluators=FoundryEvals(client=mock_oai, model="gpt-4o"),
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -2098,7 +2360,6 @@ class TestEvalResultsWithItems:
 
 class TestFetchOutputItems:
     async def test_fetches_and_converts_output_items(self) -> None:
-        from agent_framework_foundry._foundry_evals import _fetch_output_items
 
         # Build mock output items matching the OpenAI SDK schema
         mock_result = MagicMock()
@@ -2160,7 +2421,6 @@ class TestFetchOutputItems:
         assert item.error_code is None
 
     async def test_handles_errored_item(self) -> None:
-        from agent_framework_foundry._foundry_evals import _fetch_output_items
 
         mock_error = MagicMock()
         mock_error.code = "QueryExtractionError"
@@ -2192,13 +2452,172 @@ class TestFetchOutputItems:
         assert len(item.scores) == 0
 
     async def test_handles_api_failure_gracefully(self) -> None:
-        from agent_framework_foundry._foundry_evals import _fetch_output_items
 
         mock_client = MagicMock()
         mock_client.evals.runs.output_items.list = AsyncMock(side_effect=TypeError("API error"))
 
         items = await _fetch_output_items(mock_client, "eval_1", "run_1")
         assert items == []
+
+    async def test_extracts_rubric_scores_from_dict_sample(self) -> None:
+
+        mock_result = MagicMock()
+        mock_result.name = "my-rubric"
+        mock_result.score = 0.85
+        mock_result.passed = True
+        mock_result.sample = {
+            "properties": {
+                "rubric_scores": [
+                    {"id": "policy", "score": 4, "applicable": True, "weight": 1, "reason": "ok"},
+                    {"id": "safety", "score": None, "applicable": False, "weight": 1, "reason": "n/a"},
+                ]
+            }
+        }
+
+        mock_oi = MagicMock()
+        mock_oi.id = "oi_1"
+        mock_oi.status = "pass"
+        mock_oi.results = [mock_result]
+        mock_oi.sample = None
+        mock_oi.datasource_item = {}
+
+        mock_client = MagicMock()
+        mock_client.evals.runs.output_items.list = AsyncMock(return_value=_AsyncPage([mock_oi]))
+
+        items = await _fetch_output_items(mock_client, "eval_1", "run_1")
+
+        assert len(items) == 1
+        scores = items[0].scores
+        assert len(scores) == 1
+        assert scores[0].dimensions is not None
+        assert len(scores[0].dimensions) == 2
+        policy = next(d for d in scores[0].dimensions if d.id == "policy")
+        assert policy.score == 4
+        assert policy.applicable is True
+        assert policy.weight == 1
+        assert policy.reason == "ok"
+        safety = next(d for d in scores[0].dimensions if d.id == "safety")
+        assert safety.score is None
+        assert safety.applicable is False
+
+    async def test_no_rubric_scores_when_absent(self) -> None:
+
+        mock_result = MagicMock()
+        mock_result.name = "relevance"
+        mock_result.score = 0.85
+        mock_result.passed = True
+        mock_result.sample = None
+
+        mock_oi = MagicMock()
+        mock_oi.id = "oi_2"
+        mock_oi.status = "pass"
+        mock_oi.results = [mock_result]
+        mock_oi.sample = None
+        mock_oi.datasource_item = {}
+
+        mock_client = MagicMock()
+        mock_client.evals.runs.output_items.list = AsyncMock(return_value=_AsyncPage([mock_oi]))
+
+        items = await _fetch_output_items(mock_client, "eval_1", "run_1")
+
+        assert items[0].scores[0].dimensions is None
+
+
+class TestExtractRubricScores:
+    def test_handles_attribute_style_properties(self) -> None:
+
+        rs = MagicMock()
+        rs.id = "policy"
+        rs.score = 5
+        rs.applicable = True
+        rs.weight = 2
+        rs.reason = "ok"
+
+        sample = MagicMock()
+        sample.properties = MagicMock()
+        sample.properties.rubric_scores = [rs]
+
+        result = _extract_rubric_scores(sample)
+        assert result is not None
+        assert result[0].id == "policy"
+        assert result[0].score == 5
+        assert result[0].weight == 2
+
+    def test_top_level_rubric_scores_in_dict(self) -> None:
+
+        sample = {"rubric_scores": [{"id": "a", "score": 3, "applicable": True, "weight": 1, "reason": "r"}]}
+        result = _extract_rubric_scores(sample)
+        assert result is not None
+        assert result[0].id == "a"
+
+    def test_returns_none_when_missing(self) -> None:
+
+        assert _extract_rubric_scores(None) is None
+        assert _extract_rubric_scores({}) is None
+        assert _extract_rubric_scores({"properties": {}}) is None
+
+    def test_skips_malformed_entries(self) -> None:
+
+        sample = {
+            "properties": {
+                "rubric_scores": [
+                    {"id": "good", "score": 3, "applicable": True, "weight": 1, "reason": "ok"},
+                    {"id": "bad-no-weight", "score": 2, "applicable": True, "reason": "x"},
+                ]
+            }
+        }
+        result = _extract_rubric_scores(sample)
+        assert result is not None
+        assert len(result) == 1
+        assert result[0].id == "good"
+
+    def test_canonical_dimension_scores_key_from_docs(self) -> None:
+        """Per the Microsoft Learn docs, runtime output uses ``properties.dimension_scores``."""
+
+        sample = {
+            "properties": {
+                "dimension_scores": [
+                    {
+                        "id": "intent_recognition",
+                        "score": 5,
+                        "applicable": True,
+                        "weight": 9,
+                        "reason": "Identified correctly.",
+                    },
+                    {
+                        "id": "general_quality",
+                        "score": 4,
+                        "applicable": True,
+                        "weight": 5,
+                        "reason": "Strong overall.",
+                    },
+                ]
+            }
+        }
+        result = _extract_rubric_scores(sample)
+        assert result is not None
+        assert [r.id for r in result] == ["intent_recognition", "general_quality"]
+        assert [r.score for r in result] == [5, 4]
+        assert [r.weight for r in result] == [9, 5]
+
+    def test_dimension_scores_via_attribute(self) -> None:
+        """Canonical key also resolves when properties exposes ``dimension_scores`` as an attr."""
+
+        rs = MagicMock()
+        rs.id = "policy_enforcement"
+        rs.score = 1
+        rs.applicable = True
+        rs.weight = 5
+        rs.reason = "violated"
+
+        sample = MagicMock()
+        sample.properties = MagicMock(spec=["dimension_scores"])
+        sample.properties.dimension_scores = [rs]
+
+        result = _extract_rubric_scores(sample)
+        assert result is not None
+        assert result[0].id == "policy_enforcement"
+        assert result[0].score == 1
 
 
 # ---------------------------------------------------------------------------
@@ -2209,7 +2628,6 @@ class TestFetchOutputItems:
 class TestPollEvalRun:
     async def test_timeout_returns_timeout_status(self) -> None:
         """Poll timeout returns EvalResults with status='timeout'."""
-        from agent_framework_foundry._foundry_evals import _poll_eval_run
 
         mock_client = MagicMock()
         mock_pending = MagicMock()
@@ -2223,7 +2641,6 @@ class TestPollEvalRun:
 
     async def test_failed_run_returns_error(self) -> None:
         """Failed run returns EvalResults with error message."""
-        from agent_framework_foundry._foundry_evals import _poll_eval_run
 
         mock_client = MagicMock()
         mock_failed = MagicMock()
@@ -2241,7 +2658,6 @@ class TestPollEvalRun:
 
     async def test_canceled_run_returns_canceled_status(self) -> None:
         """Canceled run returns EvalResults with status='canceled'."""
-        from agent_framework_foundry._foundry_evals import _poll_eval_run
 
         mock_client = MagicMock()
         mock_canceled = MagicMock()
@@ -2266,7 +2682,6 @@ class TestPollEvalRun:
 class TestEvaluateTraces:
     async def test_raises_without_required_args(self) -> None:
         """Raises ValueError when no response_ids, trace_ids, or agent_id given."""
-        from agent_framework_foundry._foundry_evals import evaluate_traces
 
         mock_client = MagicMock()
         with pytest.raises(ValueError, match="Provide at least one of"):
@@ -2277,7 +2692,6 @@ class TestEvaluateTraces:
 
     async def test_response_ids_path(self) -> None:
         """evaluate_traces with response_ids uses the responses API path."""
-        from agent_framework_foundry._foundry_evals import evaluate_traces
 
         mock_client = MagicMock()
 
@@ -2325,7 +2739,6 @@ class TestEvaluateTraces:
 
     async def test_trace_ids_path(self) -> None:
         """evaluate_traces with trace_ids builds azure_ai_traces data source."""
-        from agent_framework_foundry._foundry_evals import evaluate_traces
 
         mock_client = MagicMock()
 
@@ -2365,7 +2778,6 @@ class TestEvaluateTraces:
 class TestEvaluateFoundryTarget:
     async def test_happy_path(self) -> None:
         """evaluate_foundry_target creates eval + run and polls to completion."""
-        from agent_framework_foundry._foundry_evals import evaluate_foundry_target
 
         mock_client = MagicMock()
 
@@ -2501,13 +2913,11 @@ class TestEvaluatorSetConsistency:
     """Verify that _AGENT_EVALUATORS and _TOOL_EVALUATORS are subsets of _BUILTIN_EVALUATORS."""
 
     def test_agent_evaluators_subset(self):
-        from agent_framework_foundry._foundry_evals import _AGENT_EVALUATORS, _BUILTIN_EVALUATORS
 
         diff = _AGENT_EVALUATORS - set(_BUILTIN_EVALUATORS.values())
         assert not diff, f"_AGENT_EVALUATORS has names not in _BUILTIN_EVALUATORS: {diff}"
 
     def test_tool_evaluators_subset(self):
-        from agent_framework_foundry._foundry_evals import _BUILTIN_EVALUATORS, _TOOL_EVALUATORS
 
         diff = _TOOL_EVALUATORS - set(_BUILTIN_EVALUATORS.values())
         assert not diff, f"_TOOL_EVALUATORS has names not in _BUILTIN_EVALUATORS: {diff}"
@@ -2521,7 +2931,6 @@ class TestEvaluatorSetConsistency:
 class TestEvaluateTracesAgentId:
     async def test_agent_id_only_path(self) -> None:
         """evaluate_traces with agent_id only builds azure_ai_traces data source."""
-        from agent_framework_foundry._foundry_evals import evaluate_traces
 
         mock_client = MagicMock()
 
@@ -2579,7 +2988,6 @@ class TestFilterToolEvaluatorsRaises:
 class TestEvaluateFoundryTargetValidation:
     async def test_target_without_type_raises(self) -> None:
         """target dict without 'type' key raises ValueError."""
-        from agent_framework_foundry._foundry_evals import evaluate_foundry_target
 
         mock_client = MagicMock()
         with pytest.raises(ValueError, match="'type' key"):

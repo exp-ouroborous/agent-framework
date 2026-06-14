@@ -16,12 +16,14 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import threading
 import uuid
 import weakref
 from abc import abstractmethod
 from base64 import urlsafe_b64encode
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias, TypeGuard, cast
 
@@ -34,6 +36,8 @@ if TYPE_CHECKING:
     from ._agents import SupportsAgentRun
     from ._middleware import MiddlewareTypes
 
+
+logger = logging.getLogger("agent_framework")
 
 # Registry of known types for state deserialization
 _STATE_TYPE_REGISTRY: dict[str, type] = {}
@@ -94,7 +98,7 @@ def _serialize_value(value: Any) -> Any:
     if hasattr(value, "to_dict") and callable(value.to_dict):
         return value.to_dict()  # pyright: ignore[reportUnknownMemberType]
     # Pydantic BaseModel support — import lazily to avoid hard dep at module level
-    try:
+    with suppress(ImportError):
         from pydantic import BaseModel
 
         if isinstance(value, BaseModel):
@@ -104,8 +108,6 @@ def _serialize_value(value: Any) -> Any:
             # Auto-register for round-trip deserialization
             _STATE_TYPE_REGISTRY.setdefault(type_id, value.__class__)
             return data
-    except ImportError:
-        pass
     if isinstance(value, list):
         return [_serialize_value(item) for item in value]  # pyright: ignore[reportUnknownVariableType]
     if isinstance(value, dict):
@@ -122,14 +124,12 @@ def _deserialize_value(value: Any) -> Any:
             if hasattr(cls, "from_dict"):
                 return cls.from_dict(value)  # type: ignore[union-attr]
             # Pydantic BaseModel support
-            try:
+            with suppress(ImportError):
                 from pydantic import BaseModel
 
                 if issubclass(cls, BaseModel):
                     data: dict[str, Any] = {str(k): v for k, v in value.items() if k != "type"}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
                     return cls.model_validate(data)
-            except ImportError:
-                pass
     if isinstance(value, list):
         return [_deserialize_value(item) for item in value]  # pyright: ignore[reportUnknownVariableType]
     if isinstance(value, dict):
@@ -583,6 +583,7 @@ class PerServiceCallHistoryPersistingMiddleware(ChatMiddleware):
         agent: SupportsAgentRun,
         session: AgentSession,
         providers: Sequence[HistoryProvider],
+        service_stores_history: bool = False,
     ) -> None:
         """Initialize the middleware.
 
@@ -590,10 +591,16 @@ class PerServiceCallHistoryPersistingMiddleware(ChatMiddleware):
             agent: The agent that owns the history providers.
             session: The active session for the current run.
             providers: The history providers participating in per-service-call persistence.
+            service_stores_history: When True, the chat client stores history server-side. The
+                middleware then skips loading providers and leaves the real conversation id
+                untouched, persisting each service call without driving the function loop with a
+                local sentinel. When False, the middleware loads providers and uses a local
+                sentinel conversation id so the function loop runs without service-side storage.
         """
         self._agent = agent
         self._session = session
         self._providers = list(providers)
+        self._service_stores_history = service_stores_history
 
     async def _prepare_service_call_context(self, messages: Sequence[Message]) -> SessionContext:
         """Create a per-call SessionContext and load history providers into it."""
@@ -605,6 +612,9 @@ class PerServiceCallHistoryPersistingMiddleware(ChatMiddleware):
         )
         for source_id, source_messages in context_messages.items():
             service_call_context.extend_messages(source_id, source_messages)
+        # When the service stores history, it owns loading; the providers are write-only sinks.
+        if self._service_stores_history:
+            return service_call_context
         for provider in self._providers:
             if not provider.load_messages:
                 continue
@@ -655,17 +665,35 @@ class PerServiceCallHistoryPersistingMiddleware(ChatMiddleware):
         response: ChatResponse,
     ) -> ChatResponse:
         """Persist a model response and apply the local follow-up sentinel when needed."""
-        if response.conversation_id is not None and not is_local_history_conversation_id(response.conversation_id):
+        if (
+            not self._service_stores_history
+            and response.conversation_id is not None
+            and not is_local_history_conversation_id(response.conversation_id)
+        ):
             raise ChatClientInvalidResponseException(
                 "require_per_service_call_history_persistence cannot be used "
                 "when the chat client returns a real conversation_id."
+            )
+
+        # In storing mode the service is expected to echo a conversation id that the next run
+        # resumes from. If it comes back empty, the provider still captures this turn but there is
+        # no service id to load from next time, so cross-turn history can be lost silently. Warn
+        # every time so this uncommon, easy-to-miss failure mode cannot fail quietly.
+        if self._service_stores_history and response.conversation_id is None:
+            logger.warning(
+                "require_per_service_call_history_persistence is enabled with a chat client that "
+                "stores history server-side, but the client returned no conversation_id; cross-turn "
+                "history may not resume. Set store=False to load and resume from the HistoryProvider "
+                "instead."
             )
 
         await self._persist_service_call_response(
             service_call_context=service_call_context,
             response=response,
         )
-        if _response_contains_follow_up_request(response):
+        # The local sentinel only applies when the service does not store history; when it does,
+        # the real conversation id already drives function-loop continuation.
+        if not self._service_stores_history and _response_contains_follow_up_request(response):
             response.mark_internal_conversation_id()
             response.conversation_id = LOCAL_HISTORY_CONVERSATION_ID
         return response
@@ -684,8 +712,12 @@ class PerServiceCallHistoryPersistingMiddleware(ChatMiddleware):
                 result type for streaming or non-streaming execution.
         """
         service_call_context = await self._prepare_service_call_context(context.messages)
-        context.messages = service_call_context.get_messages(include_input=True)
-        self._strip_local_conversation_id(context)
+        # When the service stores history, leave the outgoing messages and the real conversation
+        # id untouched (pass-through); the middleware only persists. Otherwise reconstruct the
+        # outgoing messages from the loaded local history and strip the local sentinel.
+        if not self._service_stores_history:
+            context.messages = service_call_context.get_messages(include_input=True)
+            self._strip_local_conversation_id(context)
 
         await call_next()
 
