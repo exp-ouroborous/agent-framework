@@ -17,7 +17,7 @@ namespace Microsoft.Agents.AI;
 /// with each source's skills appended sequentially. No deduplication or filtering is applied.
 /// </remarks>
 [Experimental(DiagnosticIds.Experiments.AgentsAIExperiments)]
-internal sealed class AggregatingAgentSkillsSource : AgentSkillsSource
+public sealed class AggregatingAgentSkillsSource : AgentSkillsSource
 {
     private readonly IEnumerable<AgentSkillsSource> _sources;
 
@@ -41,5 +41,19 @@ internal sealed class AggregatingAgentSkillsSource : AgentSkillsSource
         }
 
         return allSkills;
+    }
+
+    /// <inheritdoc/>
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            foreach (var source in this._sources)
+            {
+                source.Dispose();
+            }
+        }
+
+        base.Dispose(disposing);
     }
 }
