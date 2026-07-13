@@ -111,16 +111,15 @@ public sealed class HarnessAgentRunner : IDisposable
     /// enqueued via the <see cref="MessageInjectingChatClient"/> so it can be picked up
     /// by the agent on its next opportunity.
     /// </summary>
-    internal Task OnStreamingInputAsync(string text)
+    internal async Task OnStreamingInputAsync(string text)
     {
         if (this._messageInjector is null)
         {
-            return Task.CompletedTask;
+            return;
         }
 
-        this._messageInjector.EnqueueMessages(this._session, [new ChatMessage(ChatRole.User, text)]);
-        this._ux.SetQueuedMessages(this._messageInjector.GetPendingMessages(this._session));
-        return Task.CompletedTask;
+        await this._messageInjector.EnqueueMessagesAsync(this._session, [new ChatMessage(ChatRole.User, text)]).ConfigureAwait(false);
+        this._ux.SetQueuedMessages(await this._messageInjector.GetPendingMessagesAsync(this._session).ConfigureAwait(false));
     }
 
     /// <summary>
@@ -151,7 +150,9 @@ public sealed class HarnessAgentRunner : IDisposable
     private async Task RunAgentLoopAsync(IList<ChatMessage> messages)
     {
         IList<ChatMessage>? nextMessages = messages;
-        IReadOnlyList<ChatMessage> lastPendingMessages = this._messageInjector?.GetPendingMessages(this._session) ?? [];
+        IReadOnlyList<ChatMessage> lastPendingMessages = this._messageInjector is not null
+            ? await this._messageInjector.GetPendingMessagesAsync(this._session).ConfigureAwait(false)
+            : [];
 
         while (nextMessages is not null)
         {
@@ -199,7 +200,7 @@ public sealed class HarnessAgentRunner : IDisposable
                         }
                     }
 
-                    this.SyncQueuedMessageDisplay(ref lastPendingMessages);
+                    lastPendingMessages = await this.SyncQueuedMessageDisplayAsync(lastPendingMessages).ConfigureAwait(false);
                 }
             }
             catch (Exception ex)
@@ -208,7 +209,7 @@ public sealed class HarnessAgentRunner : IDisposable
             }
 
             // Final sync after streaming.
-            this.SyncQueuedMessageDisplay(ref lastPendingMessages);
+            lastPendingMessages = await this.SyncQueuedMessageDisplayAsync(lastPendingMessages).ConfigureAwait(false);
 
             this._ux.StopSpinner();
             await this._ux.EndStreamingOutputAsync().ConfigureAwait(false);
@@ -275,14 +276,15 @@ public sealed class HarnessAgentRunner : IDisposable
     /// Messages that have been consumed (drained by the service) are echoed to the output
     /// area as regular user-input entries.
     /// </summary>
-    private void SyncQueuedMessageDisplay(ref IReadOnlyList<ChatMessage> lastPendingMessages)
+    /// <returns>The updated snapshot of pending messages.</returns>
+    private async Task<IReadOnlyList<ChatMessage>> SyncQueuedMessageDisplayAsync(IReadOnlyList<ChatMessage> lastPendingMessages)
     {
         if (this._messageInjector is null)
         {
-            return;
+            return lastPendingMessages;
         }
 
-        var pending = this._messageInjector.GetPendingMessages(this._session);
+        var pending = await this._messageInjector.GetPendingMessagesAsync(this._session).ConfigureAwait(false);
 
         int consumedCount = lastPendingMessages.Count - pending.Count;
         for (int i = 0; i < consumedCount && i < lastPendingMessages.Count; i++)
@@ -291,7 +293,7 @@ public sealed class HarnessAgentRunner : IDisposable
             this._ux.WriteUserInputEcho(text);
         }
 
-        lastPendingMessages = pending;
         this._ux.SetQueuedMessages(pending);
+        return pending;
     }
 }
