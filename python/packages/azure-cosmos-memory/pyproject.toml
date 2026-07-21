@@ -71,7 +71,7 @@ extend = "../../pyproject.toml"
 [tool.ruff.lint.extend-per-file-ignores]
 # Samples are illustrative scripts: allow prints and a plain blocking input() loop, and
 # skip docstring/namespace/copyright rules.
-"samples/**" = ["D", "INP", "ERA001", "RUF", "S", "T201", "CPY", "ASYNC250"]
+"samples/**" = ["D", "INP", "commented-out-code", "RUF", "S", "print", "CPY", "blocking-input-in-async-function"]
 
 [tool.coverage.run]
 omit = [
