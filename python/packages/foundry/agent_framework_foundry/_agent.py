@@ -659,6 +659,8 @@ class RawFoundryAgent(
             result = await agent.run("Hello!")
     """
 
+    service_session_state_keys: ClassVar[frozenset[str]] = frozenset({FOUNDRY_HOSTED_AGENT_SESSION_ID_KEY})
+
     def __init__(
         self,
         *,

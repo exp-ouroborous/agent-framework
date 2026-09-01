@@ -1383,12 +1383,38 @@ class ChatMiddlewareLayer(Generic[OptionsCoT]):
             kwargs=context_kwargs,
             function_invocation_kwargs=function_invocation_kwargs,
         )
+        source_messages = messages if isinstance(messages, list) else None
+        baseline_message_ids = {id(message) for message in messages}
+        middleware_messages = cast("list[Message]", context.messages)
+        downstream_messages: list[Message] | None = None
 
         async def _execute() -> ChatResponse | ResponseStream[ChatResponseUpdate, ChatResponse] | None:
-            return await pipeline.execute(
-                context=context,
-                final_handler=self._middleware_handler,
-            )
+            def _final_handler(
+                middleware_context: ChatContext,
+            ) -> Awaitable[ChatResponse] | ResponseStream[ChatResponseUpdate, ChatResponse]:
+                nonlocal downstream_messages
+                downstream_messages = (
+                    middleware_context.messages
+                    if isinstance(middleware_context.messages, list)
+                    else list(middleware_context.messages)
+                )
+                middleware_context.messages = downstream_messages
+                return self._middleware_handler(middleware_context)
+
+            try:
+                return await pipeline.execute(
+                    context=context,
+                    final_handler=_final_handler,
+                )
+            finally:
+                if source_messages is not None:
+                    from ._compaction import _reconcile_compaction_summaries  # pyright: ignore[reportPrivateUsage]
+
+                    _reconcile_compaction_summaries(
+                        source_messages,
+                        downstream_messages if downstream_messages is not None else middleware_messages,
+                        baseline_message_ids,
+                    )
 
         if stream:
             # For streaming, wrap execution in ResponseStream.from_awaitable
@@ -1417,14 +1443,17 @@ class ChatMiddlewareLayer(Generic[OptionsCoT]):
         handler_kwargs = dict(context.kwargs)
         compaction_strategy = handler_kwargs.pop("compaction_strategy", None)
         tokenizer = handler_kwargs.pop("tokenizer", None)
-        return super().get_response(  # type: ignore[misc, no-any-return]
-            messages=context.messages,
-            stream=context.stream,
-            options=context.options or {},
-            compaction_strategy=compaction_strategy,
-            tokenizer=tokenizer,
-            function_invocation_kwargs=context.function_invocation_kwargs,
-            client_kwargs=handler_kwargs,
+        return cast(
+            "Awaitable[ChatResponse] | ResponseStream[ChatResponseUpdate, ChatResponse]",
+            super().get_response(  # type: ignore[misc]
+                messages=context.messages,
+                stream=context.stream,
+                options=context.options or {},
+                compaction_strategy=compaction_strategy,
+                tokenizer=tokenizer,
+                function_invocation_kwargs=context.function_invocation_kwargs,
+                client_kwargs=handler_kwargs,
+            ),
         )
 
 
