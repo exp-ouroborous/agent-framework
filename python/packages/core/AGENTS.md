@@ -94,7 +94,8 @@ The vector store API is experimental under the shared `VECTOR_STORES` feature ID
     recursively; removing the whole tree means no filter. Paging parameters do not support null omission.
 - **`BaseVectorCollection`** - Base class for collection lifecycle and msgspec-backed record CRUD operations;
   upserts generate embeddings by default, retrieval excludes vectors by default, and filtered retrieval is an
-  alternate mode to key lookup
+  alternate mode to key lookup. Agent-facing CRUD tools use its `key_json_schema`, `key_from_json`, and
+  `key_to_json` hooks so connectors can preserve native key identity at JSON boundaries.
 - **Embedding generation selection** - `generate_vectors=True` regenerates every vector field, `False` preserves all
   values, and a list or tuple of logical vector field names generates only those fields so connectors can combine
   local, precomputed, and provider-side vectorization
@@ -112,6 +113,17 @@ The vector store API is experimental under the shared `VECTOR_STORES` feature ID
   filter execution, score thresholds (including provider-defined/default metrics), and paging. Use native backend
   execution where available, otherwise an explicit connector-local fallback or reject unsupported options
 - **`create_vector_search_tool`** - Creates an agent tool from any `SupportsVectorSearch` implementation
+- **`create_upsert_tool` / `create_get_tool` / `create_delete_tool`** - Create agent tools for collection CRUD;
+  upsert and delete require approval by default, while get does not. Auto-generated keys are omitted from upsert
+  input only when the record is a dictionary or the typed model declares a key default. Connector partial-write
+  errors propagate because the collection contract cannot report unknown committed subsets.
+- **`VectorStoreHistoryProvider`** - Stores full scoped conversation history in a provider-owned collection;
+  optional embeddings enable session-scoped history search and optional compaction affects only loaded context.
+  Embedding-enabled history requires an explicit collection name; physical retention, large-history paging, and
+  concurrent clear semantics remain backing-store guarantees.
+- **`VectorCollectionContextProvider`** - Adds instructions and configurable CRUD/search tools for a caller-owned
+  collection. Callers explicitly provide a best-effort logical scope filter (or `None`); it is not a security
+  boundary. Independently configured additional search tools retain their own filters.
 - **`InMemoryCollection` / `InMemoryStore`** - Dependency-free, process-local development and test implementation;
   cosine scoring scales finite inputs, all metrics reject non-finite scores, and unsupported distance functions
   fail before record scanning. Hamming scores/thresholds use the fraction of unequal dimensions, not a count.
@@ -145,6 +157,7 @@ The vector store API is experimental under the shared `VECTOR_STORES` feature ID
 
 ### Skills (`_skills.py`)
 
+- **Skill frontmatter parsing** - Local and MCP archive skill loaders use PyYAML's `SafeLoader` node composition, not dictionary construction, so duplicate mapping entries remain available for validation and no YAML object constructors run. Recognized root names must be lowercase and unique after YAML decoding. Scalar fields remain text (including numeric/boolean scalar spellings); null root values remain unset. Decoded keys and retained scalar values cannot contain Unicode surrogate code points, which cannot be encoded as UTF-8. Invalid optional metadata mappings or entries warn and are skipped; case-sensitive duplicate metadata keys keep the first valid value. Invalid YAML syntax or invalid recognized root fields reject the skill. Quoting, escapes, multiline folding/chomping, and line-ending normalization follow PyYAML. YAML merge keys (`<<`) are not expanded: they are invalid at the root and skipped with warnings in metadata.
 - **`Skill`** - Abstract base for a skill definition bundling instructions (`content`) with frontmatter metadata, resources, and scripts. Concrete subclasses (`InlineSkill`, `FileSkill`, `ClassSkill`) accept a `frontmatter=SkillFrontmatter(...)` argument carrying the spec fields. Adding new spec fields is done in one place — on `SkillFrontmatter` — keeping the subclass constructors stable.
 - **`SkillFrontmatter`** - L1 discovery metadata for a skill (`name`, `description`, `license`, `compatibility`, `allowed_tools`, `metadata`). All fields are mutable plain attributes; the constructor validates `name`, `description`, and `compatibility` against the spec but post-construction assignments are not re-validated. Spec fields are reachable on every skill via `skill.frontmatter`.
 - **`SkillResource`** - Named supplementary content attached to a skill; holds either static `content` or a dynamic `function` (sync or async). Exactly one must be provided.
